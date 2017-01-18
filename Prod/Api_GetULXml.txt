@@ -1,0 +1,95 @@
+USE [SampleManager]
+GO
+/****** Object:  StoredProcedure [Api].[GetULXml]    Script Date: 01/18/2017 09:43:14 OBS! PROD ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+-- =============================================
+-- Author:		Jonny Reichwald
+-- Create date: 2011-02-25
+-- Description:	Create xml that can be sent to UL, based on db data
+-- Changed: 2011-03-29 - RequisitionId is changed from using bs.RequisitionId to bs.BatchId
+-- =============================================
+ALTER PROCEDURE [Api].[GetULXml]
+	-- Add the parameters for the stored procedure here
+	@BatchId int
+AS
+BEGIN
+	-- SET NOCOUNT ON added to prevent extra result sets from
+	-- interfering with SELECT statements.
+	SET NOCOUNT ON;
+
+
+with xmlnamespaces(default 'http://www.healthxml.org/Schemas/CEN/1613/2001/01/LaboratoryServiceRequest', 'http://www.w3.org/2001/XMLSchema-instance' as xsi)
+select
+	'2021002973D003' as 'Header/Endpoints/From/AddressId',
+	'00072321000024S0002' as 'Header/Endpoints/To/AddressId',
+	'MEDREQ' as 'Header/Properties/Topic',
+
+	'Blodsmitta: Yes' as 'Body/ServiceRequest/Reason', 
+	bs.ReferralId as 'Body/ServiceRequest/RequesterId',
+	bs.RequisitionId as 'Body/ServiceRequest/ProviderId',
+	CURRENT_TIMESTAMP as 'Body/ServiceRequest/IssueTime',
+	'ROUTINE' as 'Body/ServiceRequest/Priority',
+
+	'PROJ1103' as 'Body/ServiceRequest/ServiceRequester/Organisation/ProviderId',
+	'EpiHealth' as 'Body/ServiceRequest/ServiceRequester/Organisation/OrganisationName',
+	'Lind, Lars' as 'Body/ServiceRequest/ServiceRequester/Professional/NameDetails/FamilyName',
+	'KEMLAB:LO' as 'Body/ServiceRequest/ServiceProvider/Organisation/AgreedId',
+	'' as 'Body/ServiceRequest/PaymentGuarantor/Organisation/RequesterId',
+	'DEB1103' as 'Body/ServiceRequest/PaymentGuarantor/Organisation/ProviderId',
+	p.CivicRegistrationNumber as 'Body/ServiceRequest/Patient/OfficialId',
+	'F' as 'Body/ServiceRequest/Patient/OfficialIdType',
+	'FALSE' as 'Body/ServiceRequest/Patient/AnonymousId',
+	case lgdb.api.CalculateGender(p.CivicRegistrationNumber)
+		when 'Female' then 'F'
+		when 'Male' then 'M'
+	end as 'Body/ServiceRequest/Patient/Sex',
+	p.LastName + ', ' + p.FirstName as 'Body/ServiceRequest/Patient/NameDetails/FamilyName',
+	
+	(
+		select 
+			bs2.TargetSystemProfile as 'Code'
+		from Api.BatchSample bs2
+		where bs2.BatchId = bs.BatchId
+		group by bs2.SampleId, bs2.SampleTypeId, bs2.SampleDate, bs2.SampleBarcode, bs2.TargetSystemProfile--, st.InvestigationCode
+		for xml path('Investigation'),  type
+	) as 'Body/ServiceRequest/Samples/SampleToBeCollected/Investigations',
+	
+	(select top 1 SampleDate
+	  from api.BatchSample bs4
+	 where bs4.BatchId = bs.BatchId
+	 order by SampleDate asc) as 'Body/ServiceRequest/Samples/SampleToBeCollected/CollectionTime', -- Äldsta provets insamlingstid.	
+	
+	(
+		select
+			'ROUTINE' as 'Priority',
+			--stm.InvestigationCode as 'Investigation/Code', -- What code should we use?
+			--st.InvestigationCode as 'Investigation/Code',
+			bs3.TargetSystemProfile as 'Investigation/Code',
+			st.InvestigationCode as 'Investigation/Name',
+			--st.BioBankSampleType as 'Investigation/Name', -- What investigations shall we do?
+			'LO' as 'Investigation/HCD'
+		from Api.BatchSample bs3
+		--inner join ConfigurationManager.LIMS.SampleTypeMapping stm on bs3.LimsSampleType = stm.LimsSampleType
+		inner join Configuration.SampleType st on bs3.SampleTypeId = st.SampleTypeId
+		where bs3.BatchId = bs.BatchId
+		group by bs3.SampleId, bs3.SampleTypeId, bs3.SampleDate, bs3.SampleBarcode, bs3.TargetSystemProfile, st.InvestigationCode, st.BioBankSampleType
+		for xml path('RequestedInvestigation'), type
+	) as 'Body/ServiceRequest/Investigations'
+	
+from Api.BatchSample bs
+inner join lgdb.dbo.ExternalParticipant ep on bs.LimsPatientId = ep.ExternalParticipantId
+inner join lgdb.dbo.ExternalSystem es on ep.ExternalSystemId = es.ExternalSystemId
+inner join lgdb.dbo.Participant p on ep.ParticipantID = p.ParticipantID
+where bs.BatchId = @BatchId and es.Description = 'Labware'
+group by bs.BatchId, bs.ReferralId, bs.TargetSystemName,  p.CivicRegistrationNumber, p.FirstName, p.LastName,
+		bs.visitsamplenumber, bs.SampleLab, bs.RequisitionId
+for xml path('EHCM'), type
+
+END
+
+
